@@ -1,0 +1,76 @@
+- name: Deploying Weblate App
+  hosts: k8-master
+  become: yes
+  ignore_errors: yes
+  vars:
+   work_dir: /tmp/work_folder/
+   version: "{{ weblate_version | default('latest') }}"
+   k8_object:
+    - { name: 'redis', kind: 'pod', apiversion: 'v1'}
+    - { name: 'postgres', kind: 'pod', apiversion: 'v1'}
+    - { name: 'weblate-deployment', kind: 'deployment', apiversion: 'apps/v1'}
+
+
+  tasks:
+
+    - name: Clearing up work directory
+      file:
+       path: "{{work_dir}}"
+       state: absent
+
+    - name: setting up work directory
+      file:
+       path: "{{work_dir}}"
+       state: directory
+
+    - name: Copying artifacts to k8-master
+      copy:
+       src: artifacts/
+       dest: "{{work_dir}}"
+       force: yes
+      tags: tmp
+
+    - name: Copying k8 manifest template
+      template:
+       src: weblate.yml
+       dest: "{{work_dir}}"
+
+    - name: Removing existing k8 objects
+      shell: kubectl delete {{ item.kind }} {{ item.name }}
+      #k8s:
+      # state: absent
+      # api_version: "{{ item.apiversion }}"
+      # kind: "{{ item.kind }}"
+      # name: "{{ item.name }}"
+      register: delete_object
+      loop: "{{ k8_object }}"
+
+    #- debug:
+    #   msg: "{{ delete_object.results.stdout_lines | list }}"
+
+    - name: Creating Configmap
+      shell: kubectl create configmap {{item}}-configmap --from-env-file={{item}}.properties -o yaml --dry-run | kubectl apply -f -
+      args:
+       chdir: "{{work_dir}}"
+      loop:
+       - redis
+       - postgres
+       - weblate
+
+    - name: Deploying Weblate app
+      shell: kubectl apply -f {{work_dir}}/weblate.yml
+      #k8s:
+      # state: present
+      # src: "{{work_dir}}/weblate.yml"
+
+    - name: "wait for weblate app"
+      uri:
+       url: "http://weblate-service:32000"
+       status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 60
+      delay: 10
+
+    - debug:
+       msg: "{% if result.status == 200 %} Weblate App is Operational at http://weblate-service:32000 {% else %} Weblate App is down {% endif %}"
